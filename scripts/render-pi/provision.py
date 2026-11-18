@@ -228,10 +228,11 @@ def retire(name, path):
         database=/home/t3worker/.t3/userdata/statev2.sqlite
         if [ -r "$database" ]; then
           sqlite3 -readonly -cmd '.timeout 3000' "$database" "
-            SELECT json_object('sequence', sequence, 'id', event_id, 'threadId', thread_id,
-              'runId', run_id, 'nodeId', node_id, 'type', event_type, 'at', occurred_at,
-              'payload', json(payload_json))
-            FROM orchestration_v2_events ORDER BY sequence
+            SELECT json_object('sequence', sequence, 'id', event_id, 'streamId', stream_id,
+              'aggregateKind', aggregate_kind, 'streamVersion', stream_version,
+              'type', event_type, 'at', occurred_at, 'payload', json(payload_json),
+              'metadata', json(metadata_json))
+            FROM orchestration_events WHERE application_event_version = 2 ORDER BY sequence
           " > /tmp/t3-pi-artifacts/t3-events.ndjson
         fi
         cp /var/log/t3-render-pi.log /tmp/t3-pi-artifacts/supervisor.log
