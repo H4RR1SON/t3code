@@ -14,7 +14,7 @@ import {
   type OrchestrationV2RemoteTaskChild,
   type OrchestrationV2Subagent,
   type ProjectId,
-  type ProviderInstanceId,
+  ProviderInstanceId,
   ProviderDriverKind,
   type RunId,
   type ThreadId,
@@ -49,6 +49,7 @@ import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolv
 import { forkParked } from "../serverActivation.ts";
 import * as PeerForwarding from "./PeerForwarding.ts";
 import * as PeerLinks from "./PeerLinks.ts";
+import * as RenderPi from "./RenderPi.ts";
 
 /** How long one follow of a remote task waits on its thread there before checking again. */
 const FOLLOW_WAIT_MS = 10 * 60 * 1_000;
@@ -94,7 +95,12 @@ export class RemoteDelegation extends Context.Service<
         readonly target: NonNullable<OrchestratorMcpDelegateTaskInput["target"]> & {
           readonly environmentId: EnvironmentId;
         };
+        readonly preparedRenderWorker?: RenderPi.Prepared;
       },
+    ) => Effect.Effect<{ readonly taskId: NodeId }, OrchestratorMcpFailure>;
+    readonly delegateToRender: (
+      scope: ThreadScope,
+      input: OrchestratorMcpDelegateTaskInput,
     ) => Effect.Effect<{ readonly taskId: NodeId }, OrchestratorMcpFailure>;
     /**
      * A `t3_thread_send` there that started or queued a run on the thread of
@@ -160,6 +166,7 @@ const make = Effect.gen(function* () {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const projects = yield* ProjectService.ProjectService;
   const repositoryIdentities = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
+  const render = yield* RenderPi.make;
   const random = yield* SecureRandom.SecureRandom;
   const hereId = yield* ServerEnvironment.ServerEnvironment.pipe(
     Effect.flatMap((environment) => environment.getEnvironmentId),
@@ -376,6 +383,14 @@ const make = Effect.gen(function* () {
         threadId: launched.threadId,
         label: link?.label ?? target.environmentId,
         title,
+        ...(input.preparedRenderWorker === undefined
+          ? {}
+          : {
+              renderSandbox: {
+                name: input.preparedRenderWorker.name,
+                sandboxId: input.preparedRenderWorker.sandboxId,
+              },
+            }),
         ...(launched.runId === null ? {} : { runId: launched.runId }),
       };
       const recorded = yield* threads
@@ -388,7 +403,9 @@ const make = Effect.gen(function* () {
           task,
           ...(input.title === undefined ? {} : { title: input.title }),
           // The driver runs there; this side only labels the task with it.
-          driver: ProviderDriverKind.make("remote"),
+          driver: ProviderDriverKind.make(
+            input.preparedRenderWorker === undefined ? "remote" : "pi",
+          ),
           modelSelection: launched.modelSelection,
           remoteChild,
           completionWake: input.mode === "wait" ? "settled_only" : "always",
@@ -441,6 +458,127 @@ const make = Effect.gen(function* () {
       return { taskId };
     },
   );
+
+  const delegateToRender: RemoteDelegation["Service"]["delegateToRender"] = Effect.fn(
+    "RemoteDelegation.delegateToRender",
+  )(function* (scope, input) {
+    const request = input.renderSandbox;
+    if (
+      request === undefined ||
+      !/^agent\/[a-zA-Z0-9][a-zA-Z0-9/._-]{0,175}$/.test(request.branch) ||
+      !/^[a-zA-Z0-9][a-zA-Z0-9/._-]{0,175}$/.test(request.baseBranch) ||
+      input.isolation === "worktree" ||
+      input.target?.environmentId !== undefined ||
+      input.target?.projectId !== undefined ||
+      input.target?.driverKind !== undefined ||
+      input.target?.model !== undefined ||
+      input.target?.providerInstanceId !== undefined
+    ) {
+      return yield* new OrchestratorMcpFailure({
+        code: "invalid_request",
+        message:
+          "Render tasks use an agent/<task> branch, a published base branch, and the worker's configured Pi model.",
+      });
+    }
+    if (!(yield* links.enabled)) {
+      return yield* new OrchestratorMcpFailure({
+        code: "capability_denied",
+        message: PeerLinks.LINKED_ENVIRONMENTS_OFF,
+      });
+    }
+    const parent = yield* threads.getThreadRecords(scope.thread.threadId, ["runs"]).pipe(
+      Effect.mapError(
+        () =>
+          new OrchestratorMcpFailure({
+            code: "thread_not_found",
+            message: "The calling thread was not found.",
+          }),
+      ),
+    );
+    if (
+      !parent.runs.some(
+        (run) =>
+          ThreadManagement.isActiveRun(run) &&
+          run.rootNodeId !== null &&
+          run.providerInstanceId === scope.thread.providerInstanceId,
+      )
+    ) {
+      return yield* new OrchestratorMcpFailure({
+        code: "parent_not_active",
+        message: "Render delegation requires an active run owned by this MCP provider session.",
+      });
+    }
+    yield* resolveRuntimeMode(parent.thread.runtimeMode, input.runtimeMode);
+    const project = yield* projects.getById(parent.thread.projectId).pipe(
+      Effect.map(Option.getOrUndefined),
+      Effect.orElseSucceed(() => undefined),
+    );
+    const repository =
+      project === undefined
+        ? undefined
+        : (yield* repositoryIdentities.resolve(project.workspaceRoot))?.locator.remoteUrl;
+    if (
+      repository === undefined ||
+      !/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+(?:\.git)?$/.test(repository)
+    ) {
+      return yield* new OrchestratorMcpFailure({
+        code: "invalid_request",
+        message: "Render delegation requires a project with a canonical HTTPS GitHub origin.",
+      });
+    }
+    const key = input.clientRequestId ?? (yield* random.uuidV4());
+    const worker = yield* render.prepare({
+      requestId: [hereId, scope.thread.threadId, scope.requestNamespace, key]
+        .map(encodeURIComponent)
+        .join(":"),
+      repository: repository.endsWith(".git") ? repository : `${repository}.git`,
+      branch: request.branch,
+      base: request.baseBranch,
+    });
+    const release = render.retire(worker.name).pipe(Effect.ignoreCause({ log: true }));
+    return yield* Effect.gen(function* () {
+      const existing = yield* links.get(worker.environmentId);
+      if (Option.isNone(existing)) {
+        const linked = yield* links.link({
+          url: worker.url,
+          pairingCode: worker.pairingCode,
+          access: parent.thread.runtimeMode,
+          expectedEnvironmentId: worker.environmentId,
+          expectedLabel: worker.name,
+        });
+        if (linked.environmentId !== worker.environmentId) {
+          return yield* new OrchestratorMcpFailure({
+            code: "orchestration_error",
+            message: "The linked Render worker does not match its reported environment.",
+          });
+        }
+      }
+      const accepted = yield* delegate(scope, {
+        ...input,
+        clientRequestId: key,
+        target: {
+          environmentId: worker.environmentId,
+          providerInstanceId: ProviderInstanceId.make("pi"),
+          model: RenderPi.model,
+          ...(input.target?.options === undefined ? {} : { options: input.target.options }),
+        },
+        preparedRenderWorker: worker,
+      });
+      yield* render.adopt(worker.name).pipe(Effect.ignoreCause({ log: true }));
+      return accepted;
+    }).pipe(
+      Effect.catchTags({
+        PeerLinkError: () =>
+          Effect.fail(
+            new OrchestratorMcpFailure({
+              code: "orchestration_error",
+              message: "Could not link the Render worker to this T3 server.",
+            }),
+          ),
+      }),
+      Effect.onError(() => release),
+    );
+  });
 
   const followUp: RemoteDelegation["Service"]["followUp"] = Effect.fn("RemoteDelegation.followUp")(
     function* (scope, environmentId, request, sent) {
@@ -786,6 +924,9 @@ const make = Effect.gen(function* () {
           "stopped",
           remote.stopCount,
         );
+        if (remote.renderSandbox !== undefined && task.status !== "completed") {
+          yield* render.retire(remote.renderSandbox.name);
+        }
         return yield* settled(parentThreadId, taskId);
       }
       return true;
@@ -871,6 +1012,9 @@ const make = Effect.gen(function* () {
       undefined,
       result.executedModel,
     );
+    if (remote.renderSandbox !== undefined && resultRun.status !== "completed") {
+      yield* render.retire(remote.renderSandbox.name);
+    }
     return yield* settled(parentThreadId, taskId);
   });
 
@@ -932,13 +1076,25 @@ const make = Effect.gen(function* () {
       }
       const { reason } = input;
       const there = followScope(scope.thread, remote);
+      const retire =
+        remote.renderSandbox === undefined ? Effect.void : render.retire(remote.renderSandbox.name);
       // A later cancel stops what started there since; a retry of this one, nothing new.
       const key = `cancel:${encodeURIComponent(scope.requestNamespace)}:${
         input.clientRequestId ?? (yield* random.uuidV4())
       }`;
       if (task.result !== null) {
         // Best effort: the result stands whether or not the stop gets there.
-        yield* stopThere(there, remote, key, reason).pipe(
+        const stop = stopThere(there, remote, key, reason);
+        if (remote.renderSandbox !== undefined) {
+          // Respect the peer's permission ceiling before destroying its compute.
+          yield* stop.pipe(
+            Effect.catchIf(
+              (error) => !isModeRefusal(error),
+              () => Effect.void,
+            ),
+          );
+        }
+        yield* (remote.renderSandbox === undefined ? stop : Effect.void).pipe(
           Effect.andThen(
             complete(
               task.threadId,
@@ -951,6 +1107,7 @@ const make = Effect.gen(function* () {
           ),
           Effect.ignoreCause({ log: true }),
         );
+        yield* retire;
         return {
           taskId: task.id,
           status:
@@ -963,7 +1120,10 @@ const make = Effect.gen(function* () {
       // here; its follower keeps trying to stop it there, across restarts.
       const unstopped = yield* stopThere(there, remote, key, reason).pipe(
         Effect.as(undefined),
-        Effect.catch((error) => Effect.succeed(error.message)),
+        Effect.catchIf(
+          (error) => remote.renderSandbox === undefined || !isModeRefusal(error),
+          (error) => Effect.succeed(error.message),
+        ),
       );
       const cancelled = reason === undefined ? "Cancelled." : `Cancelled: ${reason}`;
       yield* complete(
@@ -987,6 +1147,7 @@ const make = Effect.gen(function* () {
             }),
         ),
       );
+      yield* retire;
       return {
         taskId: task.id,
         status: "cancel_requested",
@@ -1011,6 +1172,7 @@ const make = Effect.gen(function* () {
   const start: RemoteDelegation["Service"]["start"] = () =>
     forkParked(
       Effect.gen(function* () {
+        yield* render.reconcile.pipe(Effect.ignoreCause({ log: true }), Effect.forkIn(followers));
         // A finished task's follower has ended, so a Stop here that owes its
         // thread there a stop starts it again. Started before the scan below;
         // a Stop that slips between the two stays owed for the next start.
@@ -1034,7 +1196,7 @@ const make = Effect.gen(function* () {
       }).pipe(Effect.ignoreCause({ log: true })),
     );
 
-  return RemoteDelegation.of({ delegate, followUp, cancel, runStatus, start });
+  return RemoteDelegation.of({ delegate, delegateToRender, followUp, cancel, runStatus, start });
 });
 
 /** A defect, logged, as a failure, so a retry covers it. */

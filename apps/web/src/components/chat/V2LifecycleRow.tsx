@@ -3,7 +3,6 @@ import { AgentElapsed } from "./AgentElapsed";
 import { projectedSubagentsToRuntime } from "@t3tools/client-runtime/state/subagentRuntime";
 import type { ReactNode } from "react";
 import { useThreadShell, useProject } from "../../state/entities";
-import { useEnvironment } from "../../state/environments";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { useNavigate } from "@tanstack/react-router";
 import { SubagentTooltipContent } from "./SubagentTooltipContent";
@@ -312,7 +311,10 @@ export function EnvironmentSubagentAvatar({
   return (
     <SubagentAvatar
       {...props}
-      driver={providerDriver ?? (remote === undefined ? driver : undefined)}
+      driver={
+        providerDriver ??
+        (remote === undefined || remote.renderSandbox !== undefined ? driver : undefined)
+      }
       displayName={displayName}
       iconUrl={iconUrl}
       accentColor={accentColor}
@@ -420,19 +422,18 @@ function SubagentTimelineLink(props: {
     (thread) => thread?.projection.subagents.find((agent) => agent.id === props.subagentId) ?? null,
   );
   const remote = props.remote ?? agent?.remoteChild;
-  const remoteEnvironment = useEnvironment(remote?.environmentId ?? null);
   const navigate = useNavigate();
   const threadId = props.threadId;
-  // A task in a linked environment opens there, if this client is connected to it.
+  // Keep a remote task on its own route even while its connection is down.
   const open =
-    threadId !== null
-      ? () => props.onOpenThread(threadId)
-      : remote !== undefined && remoteEnvironment !== null
-        ? () =>
-            void navigate({
-              to: "/$environmentId/$threadId",
-              params: buildThreadRouteParams(scopeThreadRef(remote.environmentId, remote.threadId)),
-            })
+    remote !== undefined
+      ? () =>
+          void navigate({
+            to: "/$environmentId/$threadId",
+            params: buildThreadRouteParams(scopeThreadRef(remote.environmentId, remote.threadId)),
+          })
+      : threadId !== null
+        ? () => props.onOpenThread(threadId)
         : null;
   const liveStatus = agent?.status ?? props.status;
   const status = props.event ? props.event.status : liveStatus;
@@ -463,7 +464,12 @@ function SubagentTimelineLink(props: {
             {props.title}
           </span>
           {remote !== undefined ? (
-            <span className="shrink-0 text-xs text-muted-foreground">on {remote.label}</span>
+            <span
+              className="shrink-0 text-xs text-muted-foreground"
+              aria-description={remote.renderSandbox?.sandboxId}
+            >
+              on {remote.label}
+            </span>
           ) : null}
         </span>
         <span

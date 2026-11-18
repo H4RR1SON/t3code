@@ -143,6 +143,27 @@ describe("threadRoutes", () => {
     ).toBe("missing");
   });
 
+  it("keeps a disconnected remote thread on its route when stale data says it is missing", () => {
+    const route = {
+      serverThreadExists: false,
+      serverThreadDeleted: false,
+      unlistedThreadDetail: { ...EMPTY_ENVIRONMENT_THREAD_STATE, status: "deleted" as const },
+      draftThreadExists: false,
+    };
+    expect(
+      resolveThreadRouteRenderState({
+        ...route,
+        bootstrapComplete: isThreadRouteSnapshotAuthoritative("live", true),
+      }),
+    ).toBe("loading");
+    expect(
+      resolveThreadRouteRenderState({
+        ...route,
+        bootstrapComplete: isThreadRouteSnapshotAuthoritative("live"),
+      }),
+    ).toBe("missing");
+  });
+
   it("opens an unlisted server thread once its detail arrives, without waiting for the shell", () => {
     const route = {
       bootstrapComplete: isThreadRouteSnapshotAuthoritative("live"),

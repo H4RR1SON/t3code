@@ -25,8 +25,9 @@ export type ThreadRouteRenderState = "loading" | "ready" | "missing";
 
 export function isThreadRouteSnapshotAuthoritative(
   status: EnvironmentShellStatus | null | undefined,
+  environmentUnavailable = false,
 ): boolean {
-  return status === "live";
+  return !environmentUnavailable && status === "live";
 }
 
 export function resolveThreadRouteRenderState(input: {

@@ -12,6 +12,19 @@ const decodeDelegateTaskResult = Schema.decodeUnknownSync(OrchestratorMcpDelegat
 const decodeThreadWaitResult = Schema.decodeUnknownSync(OrchestratorMcpThreadWaitResult);
 
 describe("orchestrator MCP contracts", () => {
+  it("keeps the published base and isolated branch in a Render task request", () => {
+    const renderSandbox = { branch: "agent/connector-stripe/enrichment", baseBranch: "main" };
+    expect(
+      decodeDelegateTaskInput({ task: "Inspect Stripe", renderSandbox }).renderSandbox,
+    ).toEqual(renderSandbox);
+    expect(() =>
+      decodeDelegateTaskInput({
+        task: "Inspect Stripe",
+        renderSandbox: { branch: "agent/stripe" },
+      }),
+    ).toThrow();
+  });
+
   it("decodes cross-provider delegated task requests and durable results", () => {
     const request = decodeDelegateTaskInput({
       task: "Inspect the workspace and report the result.",

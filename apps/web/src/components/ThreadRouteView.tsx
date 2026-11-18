@@ -19,6 +19,8 @@ import {
 } from "../state/entities";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { useEnvironmentShellStatus } from "../state/shell";
+import { usePrimaryEnvironmentId } from "../state/environments";
+import { useEnvironmentPresentation } from "../state/presentation";
 import { environmentThreadShells, threadFamilies, useEnvironmentThread } from "../state/threads";
 import {
   buildThreadRouteParams,
@@ -67,10 +69,19 @@ export function ThreadRouteView({
     draftId === null ? null : store.getPromotedDraftRedirect(draftId),
   );
   const serverThreadRef = target.kind === "server" ? target.threadRef : null;
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const { isReady: catalogReady, presentation } = useEnvironmentPresentation(
+    serverThreadRef?.environmentId ?? null,
+  );
+  const remoteUnavailable =
+    catalogReady &&
+    serverThreadRef !== null &&
+    serverThreadRef.environmentId !== primaryEnvironmentId &&
+    presentation?.connection.phase !== "connected";
   const serverThreadShell = useQuietThreadShell(serverThreadRef);
   const shellStatus = useEnvironmentShellStatus(serverThreadRef?.environmentId ?? null);
   const environmentThreadRefs = useEnvironmentThreadRefs(serverThreadRef?.environmentId ?? null);
-  const bootstrapComplete = isThreadRouteSnapshotAuthoritative(shellStatus);
+  const bootstrapComplete = isThreadRouteSnapshotAuthoritative(shellStatus, remoteUnavailable);
   const draftThread = useComposerDraftStore((store) =>
     serverThreadRef ? store.getDraftThreadByRef(serverThreadRef) : null,
   );
@@ -208,6 +219,12 @@ export function ThreadRouteView({
     } else {
       redirect = <Navigate to="/" replace />;
     }
+  } else if (remoteUnavailable && renderState === "loading" && serverThreadShell === null) {
+    view = (
+      <p role="status" className="m-auto px-6 text-sm text-muted-foreground">
+        {presentation?.entry.target.label ?? target.threadRef.environmentId} · Offline
+      </p>
+    );
   } else if (hiddenByTagFilter) {
     redirect = <Navigate to="/" replace />;
   } else if (offShellBlocked) {

@@ -171,6 +171,15 @@ export type OrchestratorMcpTerminalDelegatedTaskStatus =
 export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   task: OrchestratorMcpPrompt,
   target: Schema.optional(OrchestratorMcpTarget),
+  renderSandbox: Schema.optional(
+    Schema.Struct({
+      branch: TrimmedNonEmptyString,
+      baseBranch: TrimmedNonEmptyString,
+    }).annotate({
+      description:
+        "Provision an isolated Render sandbox for this project's published Git branch. Use an agent/<task> branch. Runs Pi with the configured Relace model.",
+    }),
+  ),
   title: Schema.optional(OrchestratorMcpTitle),
   role: Schema.optional(OrchestratorMcpTaskRole),
   isolation: Schema.optional(

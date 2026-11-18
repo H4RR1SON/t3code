@@ -2669,6 +2669,14 @@ const make = Effect.gen(function* () {
       };
     }),
     delegateTask: Effect.fn("OrchestratorMcpService.delegateTask")(function* (callerScope, input) {
+      if (input.renderSandbox !== undefined) {
+        yield* requireCapability(callerScope);
+        const scope = yield* requireThreadScope(callerScope, "delegate_task");
+        const { taskId } = yield* remoteDelegation.delegateToRender(scope, input);
+        return yield* input.mode === "wait"
+          ? awaitTask(scope, taskId, taskId, input.timeoutMs)
+          : readTask(scope, taskId, false, true);
+      }
       const environmentId =
         input.target === undefined
           ? undefined
