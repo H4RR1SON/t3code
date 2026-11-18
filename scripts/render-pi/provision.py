@@ -172,15 +172,6 @@ def prepare(args, path):
             raise ProvisionError("GitHub App private key must be an absolute private file")
         if not re.fullmatch(r"[a-z0-9-]+\[bot\]", app_config["botLogin"]):
             raise ProvisionError("Configure the GitHub App bot login")
-    footprint_url = os.environ.get("T3_RENDER_PI_FOOTPRINT_URL", "")
-    footprint = (secret("T3_RENDER_PI_FOOTPRINT_TOKEN_FILE")
-                 if os.environ.get("T3_RENDER_PI_FOOTPRINT_TOKEN_FILE") else None)
-    parsed_url = urlsplit(footprint_url)
-    if bool(footprint_url) != bool(footprint) or (footprint_url and (
-        parsed_url.scheme != "https" or not parsed_url.hostname or parsed_url.username is not None
-        or parsed_url.query or parsed_url.fragment
-    )):
-        raise ProvisionError("Configure both a private Footprint token file and an HTTPS endpoint")
     ledger = None
     if os.environ.get("T3_RENDER_PI_LEDGER_FILE") and args.repository.casefold() == "https://github.com/noresponsehq/noresponse.git":
         ledger = json.loads(secret("T3_RENDER_PI_LEDGER_FILE").read_text())
@@ -220,14 +211,12 @@ def prepare(args, path):
         if app:
             credential = github_app.mint(args.repository, app_config, app_key)
             deliver(sandbox, json.dumps(credential).encode(), "github-app.json")
-        if footprint is not None:
-            deliver(sandbox, footprint.read_bytes(), "footprint-token")
         if ledger is not None:
             deliver(sandbox, json.dumps(ledger).encode(), "ledger.json")
         guest(sandbox, "bash", "-c",
               'setsid /usr/local/bin/t3-render-pi-worker "$@" </dev/null >/var/log/t3-render-pi.log 2>&1 &',
               "start", args.name, args.repository, args.branch, args.base,
-              args.base_commit or "", footprint_url, transport)
+              args.base_commit or "", transport)
         checkout = json.loads(repeat(lambda: guest(sandbox, "cat", f"{GUEST_PRIVATE}/checkout.json")))
         record = identify(sandbox, args.name, transport)
         guest(sandbox, "runuser", "-u", "t3worker", "--", "t3", "project", "add",

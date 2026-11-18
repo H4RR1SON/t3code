@@ -6,8 +6,7 @@ repository="${2:?canonical HTTPS repository URL required}"
 branch="${3:?isolated branch required}"
 base="${4:?base branch required}"
 base_commit="${5:-}"
-footprint_url="${6:-}"
-transport="${7:-https}"
+transport="${6:-https}"
 [[ "$name" =~ ^nr-[a-z0-9-]+$ && "${#name}" -lt 64 ]]
 [[ "$repository" =~ ^https://github[.]com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+[.]git$ ]]
 [[ "$branch" == agent/* ]]
@@ -35,7 +34,7 @@ join_pid=
 t3_pid=
 finish() {
   rm -f "$secrets/tailnet-key" "$secrets/relace-key" "$secrets/git-token" \
-    "$secrets/github-app.json" "$secrets/footprint-token" "$secrets/ledger.json"
+    "$secrets/github-app.json" "$secrets/ledger.json"
   if [[ -n "$t3_pid" ]]; then kill "$t3_pid" 2>/dev/null || true; fi
   if [[ -n "$join_pid" ]]; then kill "$join_pid" 2>/dev/null || true; fi
   kill "$tail_pid" 2>/dev/null || true
@@ -96,17 +95,17 @@ jq -nc --arg sha "$fetched" --argjson ms "$(( $(date +%s%3N) - git_started ))" \
   '{commit:$sha, milliseconds:$ms}' >"$secrets/checkout.json"
 
 install -d -o t3worker -g t3worker -m 0700 "$t3home" "$t3home/userdata"
-runuser -u t3worker -- tee "$t3home/userdata/settings.json" >/dev/null <<'SETTINGS'
-{"linkedEnvironmentsEnabled":true,"providerInstances":{"pi":{"driver":"pi","enabled":true,"settings":{"launchArgs":"--provider relace --model deepseek-ai/DeepSeek-V4.1-Flash-1017"}}}}
-SETTINGS
-if [[ -n "$footprint_url" ]]; then
-  jq -nc --arg url "$footprint_url" \
-    '{mcpServers:{footprint:{url:$url,headers:{Authorization:"Bearer ${FOOTPRINT_API_KEY}"}}}}' \
-    | install -o t3worker -m 0600 /dev/stdin "$home/.pi/agent/mcp.json"
-  FOOTPRINT_API_KEY="$(cat "$secrets/footprint-token")"
-  rm -f "$secrets/footprint-token"
-  export FOOTPRINT_API_KEY
+pi_args='--provider relace --model deepseek-ai/DeepSeek-V4.1-Flash-1017'
+if [[ "${repository,,}" == https://github.com/noresponsehq/noresponse.git ]]; then
+  if [[ ! -f "$checkout/.agents/skills/enrich-connector/SKILL.md" ]]; then
+    echo 'Published NoResponse base is missing its connector skills' >&2
+    exit 1
+  fi
+  pi_args+=" --no-skills --skill $checkout/.agents/skills"
 fi
+jq -nc --arg launch "$pi_args" \
+  '{linkedEnvironmentsEnabled:true,providerInstances:{pi:{driver:"pi",enabled:true,settings:{launchArgs:$launch}}}}' \
+  | install -o t3worker -m 0600 /dev/stdin "$t3home/userdata/settings.json"
 
 wait "$join_pid"
 join_pid=
@@ -135,5 +134,5 @@ fi
 runuser -u t3worker --preserve-environment -- env HOME="$home" USER=t3worker LOGNAME=t3worker \
   t3 "${t3_args[@]}" >/dev/null &
 t3_pid=$!
-unset RELACE_API_KEY GH_TOKEN FOOTPRINT_API_KEY NR_LEDGER_URL NR_LEDGER_TOKEN
+unset RELACE_API_KEY GH_TOKEN NR_LEDGER_URL NR_LEDGER_TOKEN
 wait -n "$tail_pid" "$t3_pid"

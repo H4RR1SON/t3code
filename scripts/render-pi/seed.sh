@@ -56,9 +56,7 @@ install -o t3worker -g t3worker -m 0600 "$here/models.json" /home/t3worker/.pi/a
 install -m 0755 "$here/start.sh" /usr/local/bin/t3-render-pi-worker
 install -m 0755 "$here/git-askpass.sh" /usr/local/bin/t3-render-pi-git-askpass
 install -m 0755 "$here/git-credential.sh" /usr/local/bin/t3-render-pi-git-credential
-if [[ $# -gt 0 ]]; then
-  bash "$here/install-enrichment.sh" "$1"
-fi
+bash "$here/install-connector-tools.sh"
 for binary in opencode codex claude; do
   if command -v "$binary" >/dev/null; then
     printf 'Unexpected harness in snapshot: %s\n' "$binary" >&2
