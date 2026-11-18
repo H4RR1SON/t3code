@@ -13,7 +13,11 @@ const decodeThreadWaitResult = Schema.decodeUnknownSync(OrchestratorMcpThreadWai
 
 describe("orchestrator MCP contracts", () => {
   it("keeps the published base and isolated branch in a Render task request", () => {
-    const renderSandbox = { branch: "agent/connector-stripe/enrichment", baseBranch: "main" };
+    const renderSandbox = {
+      branch: "agent/connector-stripe/enrichment",
+      baseBranch: "main",
+      baseCommit: "d54e84c9f447a27bc6d88116b9db8b7c8a561cd1",
+    };
     expect(
       decodeDelegateTaskInput({ task: "Inspect Stripe", renderSandbox }).renderSandbox,
     ).toEqual(renderSandbox);
@@ -21,6 +25,12 @@ describe("orchestrator MCP contracts", () => {
       decodeDelegateTaskInput({
         task: "Inspect Stripe",
         renderSandbox: { branch: "agent/stripe" },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeDelegateTaskInput({
+        task: "Inspect Stripe",
+        renderSandbox: { ...renderSandbox, baseCommit: "d54e84c" },
       }),
     ).toThrow();
   });

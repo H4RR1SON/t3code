@@ -175,9 +175,10 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
     Schema.Struct({
       branch: TrimmedNonEmptyString,
       baseBranch: TrimmedNonEmptyString,
+      baseCommit: Schema.optional(Schema.String.check(Schema.isPattern(/^[0-9a-f]{40}$/))),
     }).annotate({
       description:
-        "Provision an isolated Render sandbox for this project's published Git branch. Use an agent/<task> branch. Runs Pi with the configured Relace model.",
+        "Run Pi with Relace in a Render sandbox. Use a unique agent/<task> branch per task and share one published baseCommit across the batch.",
     }),
   ),
   title: Schema.optional(OrchestratorMcpTitle),

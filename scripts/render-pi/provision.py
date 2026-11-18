@@ -12,8 +12,10 @@ import subprocess
 import sys
 import tempfile
 import time
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.parse import urlencode, urlsplit
+from urllib.request import ProxyHandler, Request, build_opener, urlopen
+
+import github_app
 
 
 STATE = Path(os.environ.get("T3_RENDER_PI_STATE", Path.home() / ".t3" / "render-pi"))
@@ -119,20 +121,24 @@ def deliver(sandbox, data, name):
         render("copy", str(private), f"{sandbox}:{GUEST_PRIVATE}/{name}")
 
 
-def identify(sandbox, name):
+def identify(sandbox, name, transport):
     dns = repeat(lambda: guest(
         sandbox, "bash", "-o", "pipefail", "-c",
         'tailscale status --json | jq -er \'select(.BackendState == "Running") | .Self.DNSName | rtrimstr(".")\'',
     ).strip())
     if not re.fullmatch(r"[a-z0-9.-]+\.ts\.net", dns) or dns.split(".")[0] != name:
         raise ProvisionError("Unexpected private hostname")
-    url = f"https://{dns}"
+    url = f"http://{dns}:3773" if transport == "tcp" else f"https://{dns}"
+    opener = build_opener(ProxyHandler({}))
 
     def descriptor():
-        with urlopen(f"{url}/.well-known/t3/environment", timeout=5) as response:
+        with opener.open(f"{url}/.well-known/t3/environment", timeout=5) as response:
             return json.load(response)
 
-    identity = repeat(descriptor, 90)
+    try:
+        identity = repeat(descriptor, 30 if transport == "tcp" else 100)
+    except ProvisionError as error:
+        raise ProvisionError(f"T3 {transport} readiness probe for {name} failed: {error}") from None
     if identity["label"] != name:
         raise ProvisionError("T3 descriptor does not belong to this worker")
     return {"sandboxId": sandbox, "name": name, "url": url, "environmentId": identity["environmentId"]}
@@ -148,19 +154,51 @@ def prepare(args, path):
     if "environmentId" in record:
         if record.get("status") not in {"ready", "active"}:
             raise ProvisionError("Worker has entered terminal cleanup")
-        if (record.get("repository"), record.get("branch"), record.get("base")) != (
-            args.repository, args.branch, args.base
+        if (record.get("repository"), record.get("branch"), record.get("base"), record.get("baseCommit")) != (
+            args.repository, args.branch, args.base, args.base_commit
         ):
             raise ProvisionError("This request ID already belongs to a different checkout")
         return record
     tailnet = delivery_key()
     relace = secret("T3_RENDER_PI_RELACE_KEY_FILE")
     git = secret("T3_RENDER_PI_GIT_TOKEN_FILE") if os.environ.get("T3_RENDER_PI_GIT_TOKEN_FILE") else None
+    app = os.environ.get("T3_RENDER_PI_GITHUB_APP_FILE")
+    if app and git:
+        raise ProvisionError("Configure one GitHub credential source")
+    if app:
+        app_config = json.loads(secret("T3_RENDER_PI_GITHUB_APP_FILE").read_text())
+        app_key = Path(app_config["privateKeyFile"])
+        if not app_key.is_absolute() or not app_key.is_file() or app_key.stat().st_mode & 0o077:
+            raise ProvisionError("GitHub App private key must be an absolute private file")
+        if not re.fullmatch(r"[a-z0-9-]+\[bot\]", app_config["botLogin"]):
+            raise ProvisionError("Configure the GitHub App bot login")
+    footprint_url = os.environ.get("T3_RENDER_PI_FOOTPRINT_URL", "")
+    footprint = (secret("T3_RENDER_PI_FOOTPRINT_TOKEN_FILE")
+                 if os.environ.get("T3_RENDER_PI_FOOTPRINT_TOKEN_FILE") else None)
+    parsed_url = urlsplit(footprint_url)
+    if bool(footprint_url) != bool(footprint) or (footprint_url and (
+        parsed_url.scheme != "https" or not parsed_url.hostname or parsed_url.username is not None
+        or parsed_url.query or parsed_url.fragment
+    )):
+        raise ProvisionError("Configure both a private Footprint token file and an HTTPS endpoint")
+    ledger = None
+    if os.environ.get("T3_RENDER_PI_LEDGER_FILE") and args.repository.casefold() == "https://github.com/noresponsehq/noresponse.git":
+        ledger = json.loads(secret("T3_RENDER_PI_LEDGER_FILE").read_text())
+        ledger_url = urlsplit(ledger["url"])
+        if (ledger_url.scheme != "https" or not ledger_url.hostname or ledger_url.username is not None
+            or ledger_url.query or ledger_url.fragment or not ledger["token"]):
+            raise ProvisionError("Configure a NoResponse ledger HTTPS URL and agent token")
+    if args.base_commit is not None and not re.fullmatch(r"[0-9a-f]{40}", args.base_commit):
+        raise ProvisionError("Base commit must be a full lowercase Git commit SHA")
+    transport = os.environ.get("T3_RENDER_PI_TAILNET_TRANSPORT", "https")
+    if transport not in {"https", "tcp"}:
+        raise ProvisionError("Tailnet transport must be https or tcp")
     rows = [row for row in matches(args.name) if row["status"] != "terminated"]
     if rows:
         raise ProvisionError(f"Unconfirmed prior provisioning of {args.name}; retire it before retrying")
     save(path, {"name": args.name, "status": "creating"})
     sandbox = None
+    checkout = None
     try:
         try:
             row = json.loads(render("create", "--group", os.environ["T3_RENDER_PI_GROUP"],
@@ -179,19 +217,29 @@ def prepare(args, path):
         deliver(sandbox, relace.read_bytes(), "relace-key")
         if git is not None:
             deliver(sandbox, git.read_bytes(), "git-token")
+        if app:
+            credential = github_app.mint(args.repository, app_config, app_key)
+            deliver(sandbox, json.dumps(credential).encode(), "github-app.json")
+        if footprint is not None:
+            deliver(sandbox, footprint.read_bytes(), "footprint-token")
+        if ledger is not None:
+            deliver(sandbox, json.dumps(ledger).encode(), "ledger.json")
         guest(sandbox, "bash", "-c",
               'setsid /usr/local/bin/t3-render-pi-worker "$@" </dev/null >/var/log/t3-render-pi.log 2>&1 &',
-              "start", args.name, args.repository, args.branch, args.base)
-        record = identify(sandbox, args.name)
+              "start", args.name, args.repository, args.branch, args.base,
+              args.base_commit or "", footprint_url, transport)
+        checkout = json.loads(repeat(lambda: guest(sandbox, "cat", f"{GUEST_PRIVATE}/checkout.json")))
+        record = identify(sandbox, args.name, transport)
         guest(sandbox, "runuser", "-u", "t3worker", "--", "t3", "project", "add",
               "--base-dir", GUEST_T3, "/work/repository")
-        record.update(status="ready", repository=args.repository, branch=args.branch, base=args.base)
+        record.update(status="ready", repository=args.repository, branch=args.branch, base=args.base,
+                      baseCommit=args.base_commit, checkout=checkout)
         save(path, record)
         return record
     except BaseException:
         if sandbox:
             stop(sandbox, args.name)
-            save(path, {"sandboxId": sandbox, "name": args.name, "status": "terminated"})
+            save(path, {"sandboxId": sandbox, "name": args.name, "status": "terminated", "checkout": checkout})
         raise
 
 
@@ -218,8 +266,12 @@ def retire(name, path):
         install -m 0700 -d /tmp/t3-pi-artifacts
         git_as_worker() { runuser -u t3worker -- git -C /work/repository "$@"; }
         git_as_worker diff --binary HEAD > /tmp/t3-pi-artifacts/working.patch
-        git_as_worker format-patch --stdout --root HEAD --not --remotes=origin \
-          > /tmp/t3-pi-artifacts/commits.patch
+        if git_as_worker show-ref --verify --quiet refs/t3/base; then
+          git_as_worker format-patch --stdout refs/t3/base..HEAD > /tmp/t3-pi-artifacts/commits.patch
+        else
+          git_as_worker format-patch --stdout --root HEAD --not --remotes=origin \
+            > /tmp/t3-pi-artifacts/commits.patch
+        fi
         git_as_worker ls-files --others --exclude-standard -z | \
           tar -C /work/repository -cf /tmp/t3-pi-artifacts/untracked.tar --null --no-recursion -T -
         if [ -d /home/t3worker/.pi/agent/sessions ]; then
@@ -276,6 +328,7 @@ def main():
     parser.add_argument("repository", nargs="?")
     parser.add_argument("branch", nargs="?")
     parser.add_argument("base", nargs="?")
+    parser.add_argument("base_commit", nargs="?")
     args = parser.parse_args()
     os.umask(0o077)
     STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -303,7 +356,7 @@ def main():
                 "pairing", "create", "--base-dir", GUEST_T3, "--ttl", "5m", "--json",
             ))
             print(json.dumps({**record, "pairingCode": pairing["credential"]}))
-        except (OSError, KeyError, ValueError, ProvisionError) as error:
+        except (OSError, KeyError, ValueError, RuntimeError, subprocess.SubprocessError, ProvisionError) as error:
             sys.exit(f"Render Pi: {error}")
 
 

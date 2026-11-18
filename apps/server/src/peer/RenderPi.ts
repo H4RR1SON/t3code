@@ -25,7 +25,7 @@ const decodePrepared = Schema.decodeEffect(Prepared);
 export const make = Effect.gen(function* () {
   const runner = yield* Effect.serviceOption(ProcessRunner.ProcessRunner);
   const path = yield* Effect.serviceOption(Path.Path);
-  const limit = yield* Semaphore.make(8);
+  const limit = yield* Semaphore.make(10);
   const executable = yield* Config.option(Config.String("T3_RENDER_PI_PROVISIONER")).pipe(
     Effect.orElseSucceed(() => Option.none()),
   );
@@ -56,6 +56,7 @@ export const make = Effect.gen(function* () {
     readonly repository: string;
     readonly branch: string;
     readonly base: string;
+    readonly baseCommit?: string;
   }) {
     const digest = yield* Effect.tryPromise({
       try: () => crypto.subtle.digest("SHA-256", new TextEncoder().encode(input.requestId)),
@@ -66,7 +67,14 @@ export const make = Effect.gen(function* () {
     ).join("");
     const name = `nr-t3-pi-${hex}`;
     return yield* limit.withPermit(
-      run(["prepare", name, input.repository, input.branch, input.base]).pipe(
+      run([
+        "prepare",
+        name,
+        input.repository,
+        input.branch,
+        input.base,
+        ...(input.baseCommit === undefined ? [] : [input.baseCommit]),
+      ]).pipe(
         Effect.flatMap((output) =>
           decodePrepared(output).pipe(
             Effect.mapError(() => failure("The Render Pi operator returned invalid worker data.")),
@@ -93,7 +101,7 @@ function isPrivateWorkerUrl(value: string, name: string): boolean {
     const url = new URL(value);
     return (
       url.origin === value &&
-      url.protocol === "https:" &&
+      (url.protocol === "https:" || (url.protocol === "http:" && url.port === "3773")) &&
       url.hostname.startsWith(`${name}.`) &&
       url.hostname.endsWith(".ts.net")
     );

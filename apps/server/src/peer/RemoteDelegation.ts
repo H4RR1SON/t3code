@@ -534,6 +534,7 @@ const make = Effect.gen(function* () {
       repository: repository.endsWith(".git") ? repository : `${repository}.git`,
       branch: request.branch,
       base: request.baseBranch,
+      ...(request.baseCommit === undefined ? {} : { baseCommit: request.baseCommit }),
     });
     const release = render.retire(worker.name).pipe(Effect.ignoreCause({ log: true }));
     return yield* Effect.gen(function* () {
